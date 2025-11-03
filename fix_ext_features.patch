@@ -1,0 +1,112 @@
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -65,6 +65,7 @@
+ #define BTUSB_INTEL_BROKEN_INITIAL_NCMD BIT(25)
+ #define BTUSB_INTEL_NO_WBS_SUPPORT	BIT(26)
+ #define BTUSB_ACTIONS_SEMI		BIT(27)
++#define BTUSB_BARROT_BR86540A02 BIT(28)
+ 
+ static const struct usb_device_id btusb_table[] = {
+ 	/* Generic Bluetooth USB device */
+@@ -800,6 +801,10 @@
+ 	/* Silicon Wave based devices */
+ 	{ USB_DEVICE(0x0c10, 0x0000), .driver_info = BTUSB_SWAVE },
+ 
++	/* Barrot bt5.4 dongle */
++	{ USB_DEVICE(0x33fa, 0x0010),
++	  .driver_info = BTUSB_BARROT_BR86540A02 },
++
+ 	{ }	/* Terminating entry */
+ };
+ 
+@@ -1153,9 +1158,17 @@
+ 	unsigned long flags;
+ 	int err = 0;
+ 
++	struct hci_dev *hdev = data->hdev;
++	u8 *p = (u8 *)buffer;
++	
++	if (test_bit(HCI_QUIRK_READ_LOCAL_EXT_FEATURES, &hdev->quirks))
++		if (count == 17)
++			if (memcmp(p, (unsigned char[]){0x0e, 0x0e, 0x01, 0x04, 0x10}, 5) == 0)
++				count -= 1;
++			
+ 	spin_lock_irqsave(&data->rxlock, flags);
+ 	skb = data->evt_skb;
+-
++	
+ 	while (count) {
+ 		int len;
+ 
+@@ -2389,6 +2402,44 @@
+ 	return 0;
+ }
+ 
++static int btusb_setup_barrot_br86540a2(struct hci_dev *hdev)
++{
++    struct sk_buff *skb;
++    int ret = 0;
++
++    BT_DBG("%s", hdev->name);
++
++    const struct {
++        const u8 *data;
++        size_t len;
++    } cmds[] = {
++        { (const u8[]){0x01, 0x00}, 2 },
++        { (const u8[]){0x05, 0x00}, 2 },
++        { (const u8[]){0x1f, 0x00, 0x40, 0x01}, 4 },
++        { (const u8[]){0x1f, 0x00, 0x20, 0x03, 0x00, 0x00, 0x00}, 7 },
++        { (const u8[]){0x1f, 0x00, 0x21, 0x11, 0x00}, 5 },
++        { (const u8[]){
++            0x1f, 0x00, 0x10, 0x16, 0x93, 0x4f, 0xa0, 0x16,
++            0x93, 0x4f, 0xa0, 0x16, 0x93, 0x4f, 0xa0, 0x16,
++            0x93, 0x4f, 0xa0, 0x87, 0x3f, 0xdc, 0x01, 0x00,
++            0x00, 0x00, 0x00, 0x56, 0x18, 0x28, 0x6c, 0x06,
++            0xf8, 0xff, 0xff
++        }, 35 },
++    };
++    for (size_t i = 0; i < ARRAY_SIZE(cmds); i++) {
++        skb = __hci_cmd_sync(hdev, 0xfc80, cmds[i].len, cmds[i].data, HCI_INIT_TIMEOUT);
++        if (IS_ERR(skb)) {
++            bt_dev_err(hdev, "Barrot BR86540A2 command %zu failed (%ld)",
++                      i, PTR_ERR(skb));
++            ret = PTR_ERR(skb);
++            break;
++        }
++        kfree_skb(skb);
++    }
++
++    return ret;
++}
++
+ static int btusb_setup_csr(struct hci_dev *hdev)
+ {
+ 	struct btusb_data *data = hci_get_drvdata(hdev);
+@@ -4096,6 +4147,12 @@
+ 		}
+ 	}
+ 
++	if (id->driver_info & BTUSB_BARROT_BR86540A02) {
++		hdev->setup = btusb_setup_barrot_br86540a2;
++		/* A bug in Read Local Extended Features */
++		set_bit(HCI_QUIRK_READ_LOCAL_EXT_FEATURES, &hdev->quirks);
++	}
++
+ 	if (data->isoc) {
+ 		err = usb_driver_claim_interface(&btusb_driver,
+ 						 data->isoc, data);
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -369,6 +369,11 @@
+ 	 * This quirk must be set before hci_register_dev is called.
+ 	 */
+ 	HCI_QUIRK_BROKEN_READ_PAGE_SCAN_TYPE,
++
++	/* When this quirk is set, the HCI_OP_READ_LOCAL_EXT_FEATURES command is
++	 * skipped. This is required for some Barrot chips.
++	 */
++	HCI_QUIRK_READ_LOCAL_EXT_FEATURES,
+ };
+ 
+ /* HCI device flags */
